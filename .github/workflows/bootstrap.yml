@@ -1,0 +1,36 @@
+name: Bootstrap Mobicom Pay
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/bootstrap.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  install-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct source archive
+        shell: bash
+        run: |
+          cat .bootstrap.part00 .bootstrap.part01 .bootstrap.part02 .bootstrap.part03 | tr -d '\n\r' | base64 -d > /tmp/mobicom-pay.zip
+          echo "80c37402625cafafc89e3a20a2e7dc0edcda76369d4854a7ca231d036ee4c790  /tmp/mobicom-pay.zip" | sha256sum -c -
+          unzip -oq /tmp/mobicom-pay.zip -d .
+
+      - name: Replace bootstrap with project source
+        shell: bash
+        run: |
+          rm -f .bootstrap.part00 .bootstrap.part01 .bootstrap.part02 .bootstrap.part03
+          rm -f .github/workflows/bootstrap.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Install Mobicom Pay v0.2"
+          git push origin HEAD:main
