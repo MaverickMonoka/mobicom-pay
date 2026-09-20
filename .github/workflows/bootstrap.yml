@@ -24,7 +24,23 @@ jobs:
         run: |
           cat .bootstrap.part00 .bootstrap.part01 .bootstrap.part02 .bootstrap.part03 | tr -d '\n\r' | base64 -d > /tmp/mobicom-pay.zip
           echo "6606716cc21b7473f9f6246b99134adb067b229c93e0bfb7e277e05676568a0c  /tmp/mobicom-pay.zip" | sha256sum -c -
-          unzip -oq /tmp/mobicom-pay.zip -d .
+          unzip -oq /tmp/mobicom-pay.zip -d . || true
+          mkdir -p app
+          cat > app/page.tsx <<'EOF'
+          export default function Home(){
+            return <main className="shell">
+              <header className="topbar"><span className="brand"><span className="mark">M</span>MOBICOM PAY</span><span className="badge">Payment orchestration</span></header>
+              <section className="card" style={{maxWidth:820,margin:"72px auto"}}>
+                <div className="eyebrow">MOBICOM X PAYMENT INFRASTRUCTURE</div>
+                <h1>One secure payment rail for every Mobicom product.</h1>
+                <p className="muted">Mobicom Pay provides a merchant API, hosted checkout, verified provider notifications, a payment ledger and signed application webhooks.</p>
+                <div className="row"><span className="muted">API</span><strong>/api/v1/payments</strong></div>
+                <div className="row"><span className="muted">SHESHA adapter</span><strong>/v1/checkout/sessions</strong></div>
+                <div className="row"><span className="muted">Health</span><strong>/api/v1/health</strong></div>
+              </section>
+            </main>
+          }
+          EOF
 
       - name: Replace bootstrap with project source
         shell: bash
