@@ -1,0 +1,1 @@
+const base=(process.env.APP_URL||'').replace(/\/$/,'');const secret=process.env.CRON_SECRET;if(!base||!secret) throw new Error('Set APP_URL and CRON_SECRET');const res=await fetch(`${base}/api/internal/retry-webhooks`,{method:'POST',headers:{authorization:`Bearer ${secret}`}});console.log(await res.text());if(!res.ok) process.exit(1);
