@@ -16,7 +16,7 @@ export async function queueMerchantEvent(merchantId: string, eventType: string, 
 export async function dispatchOutboundEvent(eventId: string): Promise<boolean> {
   const db = supabaseAdmin();
   const { data: event, error } = await db.from('mp_outbound_events')
-    .select('id, merchant_id, event_type, payload, attempts, merchants(webhook_url, webhook_secret)')
+    .select('id, merchant_id, event_type, payload, attempts, merchants:mp_merchants(webhook_url, webhook_secret)')
     .eq('id', eventId).single();
   if (error || !event) return false;
   const merchant = Array.isArray(event.merchants) ? event.merchants[0] : event.merchants;
