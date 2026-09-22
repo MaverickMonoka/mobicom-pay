@@ -12,7 +12,7 @@ export async function authenticateMerchant(req: Request): Promise<MerchantAuth |
   const db = supabaseAdmin();
   const { data, error } = await db
     .from('mp_api_keys')
-    .select('id, merchant_id, merchants(name, active)')
+    .select('id, merchant_id, merchants:mp_merchants(name, active)')
     .eq('key_hash', hash)
     .eq('active', true)
     .maybeSingle();

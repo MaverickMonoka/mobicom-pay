@@ -6,7 +6,7 @@ export const dynamic='force-dynamic';
 
 export default async function Checkout({params,searchParams}:{params:Promise<{id:string}>,searchParams:Promise<{result?:string}>}){
   const {id}=await params; const query=await searchParams;
-  const {data:p}=await supabaseAdmin().from('mp_payments').select('id,status,amount_cents,currency,description,external_reference,customer_email,return_url,cancel_url,mp_merchants(name)').eq('id',id).maybeSingle();
+  const {data:p}=await supabaseAdmin().from('mp_payments').select('id,status,amount_cents,currency,description,external_reference,customer_email,return_url,cancel_url,merchants:mp_merchants(name)').eq('id',id).maybeSingle();
   if(!p) notFound();
   const merchant=Array.isArray(p.merchants)?p.merchants[0]:p.merchants;
   const checkout=buildCheckout(p);
