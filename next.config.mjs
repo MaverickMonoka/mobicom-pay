@@ -1,6 +1,3 @@
 /** @type {import('next').NextConfig} */
-const nextConfig = {
-  poweredByHeader: false,
-  reactStrictMode: true,
-};
+const nextConfig={reactStrictMode:true};
 export default nextConfig;
