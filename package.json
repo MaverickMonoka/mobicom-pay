@@ -1,12 +1,11 @@
 {
   "name": "mobicom-pay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
+    "dev": "wrangler dev",
+    "test": "wrangler deploy --dry-run",
+    "build": "wrangler deploy --dry-run",
     "worker:dev": "wrangler dev",
     "worker:check": "wrangler deploy --dry-run",
     "worker:deploy": "wrangler deploy"
