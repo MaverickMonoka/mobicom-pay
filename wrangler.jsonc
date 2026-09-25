@@ -1,20 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "mobicom-pay",
-  "main": ".open-next/worker.js",
-  "compatibility_date": "2026-09-22",
-  "compatibility_flags": [
-    "nodejs_compat",
-    "global_fetch_strictly_public"
-  ],
-  "assets": {
-    "directory": ".open-next/assets",
-    "binding": "ASSETS"
-  },
-  "services": [
-    {
-      "binding": "WORKER_SELF_REFERENCE",
-      "service": "mobicom-pay"
-    }
-  ]
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "PAYFAST_SANDBOX": "true",
+    "PAYFAST_MERCHANT_ID": "10000100",
+    "PAYFAST_MERCHANT_KEY": "46f0cd694581a",
+    "PAYFAST_SKIP_IP_CHECK": "true"
+  }
 }
