@@ -35,3 +35,5 @@ jobs:
 # rerun after Cloudflare token configuration
 
 # rerun after CLOUDFLARE_API_TOKEN added
+
+# rerun after Cloudflare API token added
