@@ -31,3 +31,5 @@ jobs:
       - run: npm install
       - run: npm run worker:check
       - run: npm run worker:deploy
+
+# rerun after Cloudflare token configuration
