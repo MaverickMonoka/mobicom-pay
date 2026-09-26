@@ -23,19 +23,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Verify Cloudflare credentials
+      - name: Verify Cloudflare token
         run: |
-          missing=0
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::CLOUDFLARE_API_TOKEN is missing"; missing=1; fi
-          exit $missing
+          test -n "$CLOUDFLARE_API_TOKEN" || (echo "::error::CLOUDFLARE_API_TOKEN is missing" && exit 1)
+      - name: Resolve Cloudflare account
+        shell: bash
+        run: |
+          response="$(curl -fsS https://api.cloudflare.com/client/v4/accounts             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"             -H "Content-Type: application/json")"
+          account_id="$(printf '%s' "$response" | jq -r '.result[0].id // empty')"
+          if [ -z "$account_id" ]; then
+            echo "::error::Token cannot read a Cloudflare account. Recreate it with the Edit Cloudflare Workers template."
+            exit 1
+          fi
+          echo "CLOUDFLARE_ACCOUNT_ID=$account_id" >> "$GITHUB_ENV"
       - run: npm install
       - run: npm run worker:check
-      - run: npm run worker:deploy
-
-# rerun after Cloudflare token configuration
-
-# rerun after CLOUDFLARE_API_TOKEN added
-
-# rerun after Cloudflare API token added
-
-# rerun after CLOUDFLARE_API_TOKEN added
+      - name: Deploy Worker
+        run: npx wrangler deploy --config wrangler.jsonc
