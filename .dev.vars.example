@@ -1,1 +1,12 @@
-NEXTJS_ENV=development
+# Local development only. Copy to .dev.vars and never commit real secrets.
+MOBICOM_PAY_API_KEY=replace-with-long-random-api-key
+MOBICOM_PAY_SESSION_SECRET=replace-with-long-random-session-secret
+MOBICOM_PAY_WEBHOOK_SECRET=replace-with-long-random-webhook-secret
+PAYFAST_PASSPHRASE=replace-with-your-payfast-sandbox-passphrase
+
+# Optional overrides. Sandbox defaults are already present in wrangler.jsonc.
+# PAYFAST_SANDBOX=true
+# PAYFAST_MERCHANT_ID=10000100
+# PAYFAST_MERCHANT_KEY=46f0cd694581a
+# PAYFAST_SKIP_IP_CHECK=true
+# PAYFAST_ALLOWED_IPS=
