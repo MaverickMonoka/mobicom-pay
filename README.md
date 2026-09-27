@@ -1,42 +1,41 @@
-# Mobicom Pay v0.2
+# Mobicom Pay v0.3
 
-Mobicom Pay is a Mobicom-controlled payment orchestration layer for Dokta, Shesha, TenderGenie and other Mobicom products. It exposes one merchant API, hosts a branded checkout, verifies PayFast Instant Transaction Notifications (ITNs), keeps a payment ledger, and sends signed payment webhooks back to each connected app.
+Mobicom Pay v0.3 is a small Cloudflare Worker payment-orchestration service for SHESHA and other Mobicom products. The active runtime is `src/worker.ts`; Supabase, Next.js and OpenNext are not required by this release.
 
-## Security boundary
+## Active architecture
 
-Mobicom Pay **does not collect or store card numbers, CVVs, bank credentials or wallet credentials**. The customer is redirected to PayFast for regulated payment capture. Mobicom Pay stores transaction references and state only.
+Application -> Mobicom Pay Worker -> hosted Mobicom Pay checkout -> PayFast -> verified PayFast ITN -> signed application webhook.
 
-PayFast's current custom-integration requirements include signed payment requests and ITN validation. Production ITN handling should verify the signature, source, amount and server confirmation. This project implements those checks.
+Mobicom Pay does not collect or store card numbers, CVVs or banking credentials. Payment capture happens at PayFast.
 
-## Stack
+## Cloudflare
 
-- Next.js 16 / Node runtime
-- Supabase Postgres (server-only access; RLS enabled and anon/auth grants revoked)
-- PayFast hosted checkout adapter (sandbox + live)
-- HMAC-SHA256 outbound webhooks
-- Deployable on Netlify, Vercel or another Node-compatible host
+The deployment is defined by `wrangler.jsonc`:
 
-## 1. Database
+- Worker: `mobicom-pay`
+- Entry point: `src/worker.ts`
+- Runtime: Cloudflare Workers with `nodejs_compat`
+- Deploy: `npm run deploy`
+- Dry run: `npm test`
 
-Create a dedicated Supabase project for payment infrastructure. Run `supabase/migrations/001_mobicom_pay.sql` in the SQL editor.
+No OpenNext adapter is used by v0.3.
 
-Do not reuse a customer-facing app database for production payment infrastructure unless you deliberately accept that operational coupling.
+## Required secrets
 
-## 2. Environment
+Set these with `wrangler secret put <NAME>`:
 
-Copy `.env.example` to `.env.local` and set the values. Keep `SUPABASE_SECRET_KEY`, `PAYFAST_PASSPHRASE`, `ADMIN_TOKEN` and `CRON_SECRET` server-side only.
+- `MOBICOM_PAY_API_KEY` — bearer key used by applications to create checkout sessions.
+- `MOBICOM_PAY_SESSION_SECRET` — HMAC secret for 30-minute checkout session tokens.
+- `MOBICOM_PAY_WEBHOOK_SECRET` — HMAC secret used to sign payment-result webhooks sent to applications.
+- `PAYFAST_PASSPHRASE` — must match the passphrase configured at PayFast.
 
-For sandbox use:
+Never commit real values.
 
-```env
-PAYFAST_SANDBOX=true
-PAYFAST_MERCHANT_ID=10000100
-PAYFAST_MERCHANT_KEY=46f0cd694581a
-```
+## Sandbox
 
-Set your own PayFast sandbox passphrase in both PayFast and `PAYFAST_PASSPHRASE`.
+`wrangler.jsonc` contains PayFast sandbox defaults. For local development copy `.dev.vars.example` to `.dev.vars` and replace the placeholders.
 
-## 3. Install and run
+Run:
 
 ```bash
 npm install
@@ -44,82 +43,65 @@ npm test
 npm run dev
 ```
 
-## 4. Create an app / merchant
-
-After the schema is installed:
+Deploy after Cloudflare authentication and secrets are configured:
 
 ```bash
-npm run merchant:create -- "Dokta" dokta https://YOUR-DOKTA-DOMAIN/api/webhooks/mobicom
+npm run deploy
 ```
 
-The script prints an API key once. Store it in the Dokta server environment. It also prints a webhook signing secret when a webhook URL is supplied.
+Then verify:
 
-Repeat for Shesha, TenderGenie, Jewish Ya Strata, Maverick Safety, etc.
-
-## 5. Create a payment from an app
-
-```bash
-curl -X POST https://pay.example.co.za/api/v1/payments \
-  -H "Authorization: Bearer mp_test_REPLACE" \
-  -H "Idempotency-Key: order-123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "amount_cents": 49900,
-    "currency": "ZAR",
-    "description": "Dokta consultation",
-    "external_reference": "APT-123",
-    "customer_email": "customer@example.com",
-    "return_url": "https://dokta.example.com/payment/return",
-    "cancel_url": "https://dokta.example.com/payment/cancel"
-  }'
+```text
+GET https://<worker-domain>/health
 ```
 
-The response includes a `checkout_url`. Redirect the customer to it. The hosted Mobicom Pay page generates the signed PayFast form server-side.
+Expected JSON includes `"ok": true`, `"version": "0.3.0"` and `"runtime": "cloudflare-worker"`.
 
-## 6. Check payment status
+## API
 
-```bash
-curl https://pay.example.co.za/api/v1/payments/PAYMENT_UUID \
-  -H "Authorization: Bearer mp_test_REPLACE"
+Create a checkout session:
+
+```http
+POST /v1/checkout/sessions
+Authorization: Bearer <MOBICOM_PAY_API_KEY>
+Content-Type: application/json
 ```
 
-Never mark an order paid because the browser returned from PayFast. Treat the verified ITN/webhook as the authoritative payment result.
+The API also accepts `POST /api/v1/payments` for compatibility.
 
-## 7. Verify Mobicom Pay webhooks in your apps
+Required request fields are an amount of at least R1.00, ZAR currency, merchant reference, and HTTPS success, cancel and webhook URLs. A successful response returns `payment_id` and `checkout_url`.
 
-Mobicom Pay posts JSON and includes:
+The checkout page creates a signed PayFast request. PayFast notifications are accepted at `POST /api/webhooks/payfast`. Mobicom Pay verifies the PayFast signature, validates the notification with PayFast, verifies the amount, and only then sends a signed `payment.paid` or `payment.failed` event to the application webhook.
 
-- `x-mobicom-event: payment.paid`
-- `x-mobicom-signature: sha256=<hex HMAC>`
+Applications must verify `x-mobicom-signature: sha256=<hex>` using `MOBICOM_PAY_WEBHOOK_SECRET` before changing an order's payment state.
 
-Calculate `HMAC-SHA256(raw_request_body, merchant_webhook_secret)` and compare it using a constant-time function. Only then update the app order/appointment/subscription.
+## Production switch
 
-## 8. Retry failed app webhooks
+Before live payments:
 
-Call `POST /api/internal/retry-webhooks` with `Authorization: Bearer <CRON_SECRET>`. The endpoint retries up to 20 due outbox events per invocation with exponential backoff.
-
-## 9. Dashboard
-
-`/admin` is protected by the `ADMIN_TOKEN` environment variable and an HttpOnly, SameSite=Strict cookie. This is sufficient for a private v0.2 operations dashboard, not a multi-user staff identity system. Add Supabase Auth/RBAC before giving multiple staff members access.
-
-## Production checklist
-
-1. Use a dedicated production Supabase project and live PayFast credentials.
+1. Replace sandbox merchant ID/key with the live PayFast merchant credentials. Prefer storing the live merchant key as a Cloudflare secret.
 2. Set `PAYFAST_SANDBOX=false`.
-3. Keep `PAYFAST_SKIP_IP_CHECK=false` in production.
-4. Use HTTPS on the Mobicom Pay domain and all app webhook URLs.
-5. Rotate API keys and webhook secrets if exposed.
-6. Add rate limiting/WAF at the hosting layer before public launch.
-7. Run security and performance advisors on Supabase after applying the schema.
-8. Test: successful payment, cancelled checkout, invalid signature, wrong amount, duplicate ITN, duplicate idempotency key, failed app webhook, and retry delivery.
-9. Do not add direct card-entry fields to Mobicom Pay unless you intentionally take on the relevant PCI DSS scope and provider requirements.
+3. Set `PAYFAST_SKIP_IP_CHECK=false`.
+4. Configure `PAYFAST_ALLOWED_IPS` for the source addresses accepted by the Worker.
+5. Confirm every success, cancel and webhook URL is HTTPS.
+6. Perform a complete live-mode readiness test before accepting customer payments.
 
-## v0.2 roadmap
+## Release validation
 
-- Yoco/Ozow/Peach gateway adapters behind the same Mobicom API
-- Move per-merchant webhook/provider secrets to Supabase Vault and add provider routing
-- Subscription/billing plans for TenderGenie and Dokta
-- Refund orchestration where the selected provider API supports it
-- Staff accounts + RBAC + audit log
-- Reconciliation exports and settlement matching
-- API-key rotation UI and provider health monitoring
+A release is operational only when all of these pass:
+
+- `GET /health` returns 200.
+- Missing/incorrect application API key returns 401.
+- Valid checkout request returns a checkout URL.
+- Invalid amount, currency or non-HTTPS callback URL is rejected.
+- Hosted checkout displays the correct amount/reference.
+- Sandbox checkout redirects to PayFast sandbox.
+- Valid PayFast ITN passes signature, provider and amount validation.
+- Forged signature and changed amount are rejected.
+- Verified payment sends a signed downstream webhook.
+- The receiving application verifies the webhook signature before marking the order paid.
+- Cancelled/failed checkout never marks an order paid.
+
+## Persistence
+
+v0.3 deliberately has no Supabase dependency and no Mobicom Pay transaction ledger. Add persistence only when reconciliation, durable merchant management, webhook retries or an operations dashboard are required.
