@@ -41,7 +41,7 @@ jobs:
             exit 1
           fi
           echo "CLOUDFLARE_ACCOUNT_ID=$account_id" >> "$GITHUB_ENV"
-      - run: npm install
+      - run: npm ci
       - run: npm run worker:check
       - name: Deploy Worker
         run: npx wrangler deploy --config wrangler.jsonc
