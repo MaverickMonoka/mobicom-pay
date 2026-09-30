@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { itnSignature } from "../lib/payfast-core.mjs";
 
 interface Env {
   MOBICOM_PAY_API_KEY: string;
@@ -55,12 +56,14 @@ function signSession(payload: Omit<SessionPayload, "issued_at">, env: Env) {
 
 function verifySession(token: string, env: Env): SessionPayload {
   if (!env.MOBICOM_PAY_SESSION_SECRET) throw new Error("MOBICOM_PAY_SESSION_SECRET is not configured");
-  const [body, signature] = token.split(".");
+  const parts = token.split(".");
+  if(parts.length!==2)throw new Error("Invalid checkout session");
+  const [body, signature] = parts;
   if (!body || !signature) throw new Error("Invalid checkout session");
   const expected = hmacHex(env.MOBICOM_PAY_SESSION_SECRET, body);
   if (!safeEqual(signature, expected)) throw new Error("Invalid checkout session");
   const payload = JSON.parse(fromB64url(body)) as SessionPayload;
-  if (!payload.issued_at || Date.now() - payload.issued_at > 30 * 60 * 1000) {
+  if (!Number.isFinite(payload.issued_at) || payload.issued_at > Date.now() + 60_000 || Date.now() - payload.issued_at > 30 * 60 * 1000) {
     throw new Error("Checkout session expired");
   }
   return payload;
@@ -69,7 +72,7 @@ function verifySession(token: string, env: Env): SessionPayload {
 function payfastEncode(value: string) {
   return encodeURIComponent(value.trim())
     .replace(/%20/g, "+")
-    .replace(/[!'()~]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+    .replace(/[!'()*~]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
 }
 
 function payfastSignature(entries: Array<[string, string]>, passphrase: string) {
@@ -101,7 +104,7 @@ function authorized(req: Request, env: Env) {
 function normalizePaymentBody(body: any) {
   const amount = Number(body?.amount_minor ?? body?.amount_cents ?? 0);
   return {
-    amount_minor: Math.round(amount),
+    amount_minor: amount,
     currency: String(body?.currency ?? "ZAR").toUpperCase(),
     merchant_reference: String(body?.merchant_reference ?? body?.external_reference ?? ""),
     order_reference: body?.order_reference ? String(body.order_reference) : undefined,
@@ -119,7 +122,7 @@ async function createSession(req: Request, env: Env) {
   const body = await req.json().catch(() => null);
   const p = normalizePaymentBody(body);
   if (
-    !Number.isInteger(p.amount_minor) ||
+    !Number.isSafeInteger(p.amount_minor) ||
     p.amount_minor < 100 ||
     p.currency !== "ZAR" ||
     !p.merchant_reference ||
@@ -205,7 +208,9 @@ async function payfastWebhook(req: Request, env: Env) {
   const params = new URLSearchParams(raw);
   const entries = Array.from(params.entries());
   const supplied = params.get("signature") || "";
-  const expected = payfastSignature(entries, env.PAYFAST_PASSPHRASE || "");
+  if(!env.PAYFAST_PASSPHRASE)return new Response("Settlement provider is not configured",{status:503});
+  if(new Set(entries.map(([key])=>key)).size!==entries.length)return new Response("duplicate fields",{status:400});
+  const expected = itnSignature(entries, env.PAYFAST_PASSPHRASE);
 
   if (!supplied || !safeEqual(supplied, expected)) return new Response("invalid signature", { status: 400 });
 
@@ -223,13 +228,15 @@ async function payfastWebhook(req: Request, env: Env) {
   const validationText = (await validation.text()).trim().toUpperCase();
   if (!validation.ok || validationText !== "VALID") return new Response("provider validation failed", { status: 400 });
 
+  if(params.get("merchant_id")!==env.PAYFAST_MERCHANT_ID)return new Response("merchant mismatch",{status:400});
   const expectedMinor = Number(params.get("custom_str3") || 0);
   const actualMinor = Math.round(Number(params.get("amount_gross") || 0) * 100);
-  if (!expectedMinor || expectedMinor !== actualMinor) return new Response("amount mismatch", { status: 400 });
+  if (!Number.isSafeInteger(expectedMinor) || expectedMinor < 100 || expectedMinor !== actualMinor) return new Response("amount mismatch", { status: 400 });
 
   const webhookUrl = params.get("custom_str1") || "";
   const merchantReference = params.get("custom_str2") || params.get("m_payment_id") || "";
-  if (!webhookUrl || !merchantReference) return new Response("missing correlation data", { status: 400 });
+  if (!webhookUrl || !merchantReference || merchantReference!==params.get("m_payment_id")) return new Response("missing correlation data", { status: 400 });
+  try{if(new URL(webhookUrl).protocol!=="https:")return new Response("invalid webhook url",{status:400})}catch{return new Response("invalid webhook url",{status:400})}
 
   const paid = (params.get("payment_status") || "").toUpperCase() === "COMPLETE";
   const event = {
@@ -278,7 +285,9 @@ export default {
     const url = new URL(req.url);
     try {
       if (req.method === "GET" && (url.pathname === "/api/v1/health" || url.pathname === "/health")) {
-        return json({ ok: true, service: "mobicom-pay", version: "0.3.0", runtime: "cloudflare-worker" });
+        const required=["MOBICOM_PAY_API_KEY","MOBICOM_PAY_SESSION_SECRET","MOBICOM_PAY_WEBHOOK_SECRET","PAYFAST_MERCHANT_ID","PAYFAST_MERCHANT_KEY","PAYFAST_PASSPHRASE"] as const;
+        const missing=required.filter(name=>!env[name]);
+        return json({ ok:true,ready:missing.length===0,missing_configuration:missing,mode:providerConfig(env).sandbox?"sandbox":"live",service:"mobicom-pay",version:"0.3.1",runtime:"cloudflare-worker" });
       }
       if (req.method === "POST" && (url.pathname === "/v1/checkout/sessions" || url.pathname === "/api/v1/payments")) {
         return createSession(req, env);

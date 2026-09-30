@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "test": "wrangler deploy --dry-run",
+    "test": "node --test tests/*.test.mjs",
     "build": "wrangler deploy --dry-run",
     "deploy": "wrangler deploy",
     "worker:dev": "wrangler dev",
