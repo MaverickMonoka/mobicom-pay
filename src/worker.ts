@@ -117,29 +117,32 @@ function normalizePaymentBody(body: any) {
   };
 }
 
+const providerIps = ['197.97.145.144/28','41.74.179.192/27','102.216.36.0/28','102.216.36.128/28','144.126.193.139'];
+function ipv4(input:string):number|null {const parts=input.split('.');if(parts.length!==4||parts.some(p=>!/^\d{1,3}$/.test(p)||Number(p)>255))return null;return parts.reduce((n,p)=>(n*256+Number(p))>>>0,0)}
+function allowedIp(ip:string,rules:string[]){const value=ipv4(ip);if(value===null)return false;return rules.some(rule=>{const [host,bitsText]=rule.split('/');const network=ipv4(host);const bits=bitsText===undefined?32:Number(bitsText);if(network===null||!Number.isInteger(bits)||bits<0||bits>32)return false;const mask=bits===0?0:(0xffffffff<<(32-bits))>>>0;return ((value&mask)>>>0)===((network&mask)>>>0)})}
+function publicHttps(input:string){try{const u=new URL(input);return u.protocol==='https:'&&!u.username&&!u.password&&!u.hash&&u.hostname.includes('.')&&!u.hostname.endsWith('.local')&&!u.hostname.endsWith('.localhost')&&!/^\d+\.\d+\.\d+\.\d+$/.test(u.hostname)&&!u.hostname.includes(':')}catch{return false}}
+const requiredConfiguration=['MOBICOM_PAY_API_KEY','MOBICOM_PAY_SESSION_SECRET','MOBICOM_PAY_WEBHOOK_SECRET','PAYFAST_MERCHANT_ID','PAYFAST_MERCHANT_KEY','PAYFAST_PASSPHRASE'] as const;
+function readiness(env:Env){const missing=requiredConfiguration.filter(name=>!env[name]);const invalid=!providerConfig(env).sandbox&&env.PAYFAST_SKIP_IP_CHECK?.toLowerCase()==='true'?['PAYFAST_SKIP_IP_CHECK must be false in live mode']:[];return {ready:missing.length===0&&invalid.length===0,missing_configuration:missing,invalid_configuration:invalid}}
+
 async function createSession(req: Request, env: Env) {
   if (!authorized(req, env)) return json({ error: "unauthorized" }, 401);
-  const body = await req.json().catch(() => null);
+  if(!readiness(env).ready)return json({error:"checkout_not_configured"},503);
+  const raw=await req.text();if(raw.length>65536)return json({error:"request_too_large"},413);
+  let body;try{body=JSON.parse(raw)}catch{return json({error:"invalid_request"},400)}
   const p = normalizePaymentBody(body);
   if (
     !Number.isSafeInteger(p.amount_minor) ||
     p.amount_minor < 100 ||
     p.currency !== "ZAR" ||
-    !p.merchant_reference ||
+    !p.merchant_reference || p.merchant_reference.length>100 || p.webhook_url.length>255 || (p.customer_email?.length??0)>100 ||
     !p.success_url ||
     !p.cancel_url ||
     !p.webhook_url
   ) {
     return json({ error: "invalid_request" }, 400);
   }
-  for (const url of [p.success_url, p.cancel_url, p.webhook_url]) {
-    try {
-      const u = new URL(url);
-      if (u.protocol !== "https:") return json({ error: "https_urls_required" }, 400);
-    } catch {
-      return json({ error: "invalid_url" }, 400);
-    }
-  }
+  if([p.success_url,p.cancel_url,p.webhook_url].some(url=>!publicHttps(url)))return json({error:'invalid_url'},400);
+  if(JSON.stringify(p).length>4096)return json({error:"checkout_payload_too_large"},413);
   const token = signSession(p, env);
   const origin = new URL(req.url).origin;
   const paymentId = "mp_" + hmacHex(env.MOBICOM_PAY_SESSION_SECRET, p.merchant_reference).slice(0, 24);
@@ -168,10 +171,9 @@ function checkoutHtml(req: Request, token: string, payload: SessionPayload, env:
     ["m_payment_id", payload.merchant_reference],
     ["amount", (payload.amount_minor / 100).toFixed(2)],
     ["item_name", (payload.description || "SHESHA order " + (payload.order_reference || payload.merchant_reference)).slice(0, 100)],
-    ["custom_str1", payload.webhook_url.slice(0, 255)],
-    ["custom_str2", payload.merchant_reference.slice(0, 255)],
+    ["custom_str1", payload.webhook_url],
+    ["custom_str2", payload.merchant_reference],
     ["custom_str3", String(payload.amount_minor)],
-    ["custom_str4", token.slice(0, 255)],
   ];
   if (payload.customer_email) fields.push(["email_address", payload.customer_email]);
   fields.push(["signature", payfastSignature(fields, env.PAYFAST_PASSPHRASE)]);
@@ -199,53 +201,62 @@ button{width:100%;border:0;border-radius:15px;padding:16px;background:#19c65b;co
 <form method="post" action="${provider.processUrl}">${inputs}<button type="submit">Continue securely</button></form>
 <div class="fine">Mobicom Pay · A Mobicom X product · ${provider.sandbox ? "Sandbox" : "Live"} settlement rail</div>
 </main></body></html>`;
-  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy":"no-referrer", "x-content-type-options":"nosniff", "x-frame-options":"DENY", "content-security-policy":`default-src 'none'; style-src 'unsafe-inline'; form-action ${provider.processUrl}; base-uri 'none'; frame-ancestors 'none'` } });
 }
 
 async function payfastWebhook(req: Request, env: Env) {
   const provider = providerConfig(env);
   const raw = await req.text();
+  if(raw.length>65536)return new Response("request too large",{status:413});
   const params = new URLSearchParams(raw);
   const entries = Array.from(params.entries());
   const supplied = params.get("signature") || "";
   if(!env.PAYFAST_PASSPHRASE)return new Response("Settlement provider is not configured",{status:503});
   if(new Set(entries.map(([key])=>key)).size!==entries.length)return new Response("duplicate fields",{status:400});
+  if(entries.at(-1)?.[0]!=="signature")return new Response("signature must be last",{status:400});
   const expected = itnSignature(entries, env.PAYFAST_PASSPHRASE);
 
   if (!supplied || !safeEqual(supplied, expected)) return new Response("invalid signature", { status: 400 });
 
-  if ((env.PAYFAST_SKIP_IP_CHECK ?? "false").toLowerCase() !== "true") {
+  if (!provider.sandbox || (env.PAYFAST_SKIP_IP_CHECK ?? "false").toLowerCase() !== "true") {
     const ip = req.headers.get("cf-connecting-ip") || "";
-    const allowed = (env.PAYFAST_ALLOWED_IPS || "").split(",").map((x) => x.trim()).filter(Boolean);
-    if (!allowed.length || !allowed.includes(ip)) return new Response("source ip rejected", { status: 403 });
+    const allowed = env.PAYFAST_ALLOWED_IPS ? env.PAYFAST_ALLOWED_IPS.split(",").map(x=>x.trim()).filter(Boolean) : providerIps;
+    if (!allowedIp(ip,allowed)) return new Response("source ip rejected", { status: 403 });
   }
 
   const validation = await fetch(provider.validateUrl, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: raw,
+    signal:AbortSignal.timeout(15000),
   });
   const validationText = (await validation.text()).trim().toUpperCase();
   if (!validation.ok || validationText !== "VALID") return new Response("provider validation failed", { status: 400 });
 
   if(params.get("merchant_id")!==env.PAYFAST_MERCHANT_ID)return new Response("merchant mismatch",{status:400});
   const expectedMinor = Number(params.get("custom_str3") || 0);
-  const actualMinor = Math.round(Number(params.get("amount_gross") || 0) * 100);
+  const gross=params.get("amount_gross")||"";
+  if(!/^\d+(?:\.\d{1,2})?$/.test(gross))return new Response("invalid amount",{status:400});
+  const [whole,fraction=""]=gross.split(".");
+  const actualMinor=Number(whole)*100+Number(fraction.padEnd(2,"0"));
   if (!Number.isSafeInteger(expectedMinor) || expectedMinor < 100 || expectedMinor !== actualMinor) return new Response("amount mismatch", { status: 400 });
 
   const webhookUrl = params.get("custom_str1") || "";
   const merchantReference = params.get("custom_str2") || params.get("m_payment_id") || "";
   if (!webhookUrl || !merchantReference || merchantReference!==params.get("m_payment_id")) return new Response("missing correlation data", { status: 400 });
-  try{if(new URL(webhookUrl).protocol!=="https:")return new Response("invalid webhook url",{status:400})}catch{return new Response("invalid webhook url",{status:400})}
+  if(!publicHttps(webhookUrl))return new Response("invalid webhook url",{status:400});
 
-  const paid = (params.get("payment_status") || "").toUpperCase() === "COMPLETE";
+  const status=(params.get("payment_status")||"").toUpperCase();
+  if(!["COMPLETE","CANCELLED","FAILED"].includes(status))return new Response("unknown payment status",{status:400});
+  const paid=status==="COMPLETE";
+  const state=paid?"paid":status==="CANCELLED"?"cancelled":"failed";
   const event = {
-    event_id: "payfast:" + (params.get("pf_payment_id") || merchantReference) + ":" + (paid ? "paid" : "failed"),
-    event_type: paid ? "payment.paid" : "payment.failed",
+    event_id: "payfast:" + (params.get("pf_payment_id") || merchantReference) + ":" + state,
+    event_type: "payment."+state,
     data: {
       id: params.get("pf_payment_id") || merchantReference,
       merchant_reference: merchantReference,
-      status: paid ? "paid" : "failed",
+      status: state,
       amount_minor: actualMinor,
       currency: "ZAR",
       provider: "mobicom_pay",
@@ -265,6 +276,7 @@ async function payfastWebhook(req: Request, env: Env) {
       "x-gateway-signature": "sha256=" + signature,
     },
     body: eventRaw,
+    signal:AbortSignal.timeout(15000),
   });
 
   if (!downstream.ok) return new Response("downstream webhook failed", { status: 502 });
@@ -285,25 +297,24 @@ export default {
     const url = new URL(req.url);
     try {
       if (req.method === "GET" && (url.pathname === "/api/v1/health" || url.pathname === "/health")) {
-        const required=["MOBICOM_PAY_API_KEY","MOBICOM_PAY_SESSION_SECRET","MOBICOM_PAY_WEBHOOK_SECRET","PAYFAST_MERCHANT_ID","PAYFAST_MERCHANT_KEY","PAYFAST_PASSPHRASE"] as const;
-        const missing=required.filter(name=>!env[name]);
-        return json({ ok:true,ready:missing.length===0,missing_configuration:missing,mode:providerConfig(env).sandbox?"sandbox":"live",service:"mobicom-pay",version:"0.3.1",runtime:"cloudflare-worker" });
+        return json({ok:true,...readiness(env),mode:providerConfig(env).sandbox?'sandbox':'live',service:'mobicom-pay',version:'0.3.2',runtime:'cloudflare-worker'});
       }
       if (req.method === "POST" && (url.pathname === "/v1/checkout/sessions" || url.pathname === "/api/v1/payments")) {
-        return createSession(req, env);
+        return await createSession(req, env);
       }
       if (req.method === "GET" && url.pathname.startsWith("/checkout/")) {
         const token = decodeURIComponent(url.pathname.slice("/checkout/".length));
-        const payload = verifySession(token, env);
+        let payload:SessionPayload;try{payload=verifySession(token,env)}catch{return json({error:"invalid_or_expired_checkout"},400)}
         return checkoutHtml(req, token, payload, env);
       }
       if (req.method === "POST" && url.pathname === "/api/webhooks/payfast") {
-        return payfastWebhook(req, env);
+        return await payfastWebhook(req, env);
       }
       if (req.method === "GET" && url.pathname === "/") return home();
       return json({ error: "not_found" }, 404);
     } catch (error) {
-      return json({ error: error instanceof Error ? error.message : "internal_error" }, 500);
+      if(error instanceof Error&&["TimeoutError","AbortError"].includes(error.name))return json({error:"gateway_timeout"},504);
+      return json({error:"gateway_unavailable"},503);
     }
   },
 };

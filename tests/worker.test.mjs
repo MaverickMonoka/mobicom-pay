@@ -8,6 +8,16 @@ const {default:worker}=await import('data:text/javascript;base64,'+Buffer.from(o
 const env={MOBICOM_PAY_API_KEY:'test-key',MOBICOM_PAY_SESSION_SECRET:'test-session',MOBICOM_PAY_WEBHOOK_SECRET:'test-hook',PAYFAST_MERCHANT_ID:'10000100',PAYFAST_MERCHANT_KEY:'test-merchant',PAYFAST_PASSPHRASE:'test-pass',PAYFAST_SANDBOX:'true',PAYFAST_SKIP_IP_CHECK:'true'};
 const input={amount_minor:12345,currency:'ZAR',merchant_reference:'payment-1',success_url:'https://shesha.example/orders',cancel_url:'https://shesha.example/orders',webhook_url:'https://shesha.example/webhook'};
 const create=body=>worker.fetch(new Request('https://pay.example/v1/checkout/sessions',{method:'POST',headers:{authorization:'Bearer test-key'},body:JSON.stringify(body)}),env);
+test('callback correlation lengths, private URLs, oversized payloads and malformed JSON are rejected',async()=>{
+ for(const body of [{...input,merchant_reference:'x'.repeat(101)},{...input,webhook_url:'https://example.com/'+ 'x'.repeat(256)},{...input,webhook_url:'https://127.0.0.1/hook'},{...input,success_url:'https://user:password@example.com' }])assert.equal((await create(body)).status,400);
+ assert.equal((await create({...input,metadata:{large:'x'.repeat(5000)}})).status,413);
+ assert.equal((await worker.fetch(new Request('https://pay.example/v1/checkout/sessions',{method:'POST',headers:{authorization:'Bearer test-key'},body:'invalid'}),env)).status,400);
+});
+test('missing settlement configuration prevents checkout creation and live IP bypass is invalid',async()=>{
+ assert.equal((await worker.fetch(new Request('https://pay.example/v1/checkout/sessions',{method:'POST',headers:{authorization:'Bearer test-key'},body:JSON.stringify(input)}),{...env,PAYFAST_PASSPHRASE:''})).status,503);
+ const response=await worker.fetch(new Request('https://pay.example/health'),{...env,PAYFAST_SANDBOX:'false'});
+ const health=await response.json();assert.equal(health.ready,false);assert.ok(health.invalid_configuration.length);
+});
 test('health distinguishes running service from configured checkout',async()=>{
  const r=await worker.fetch(new Request('https://pay.example/health'),{});const b=await r.json();assert.equal(b.ok,true);assert.equal(b.ready,false);assert.ok(b.missing_configuration.includes('MOBICOM_PAY_API_KEY'));
 });
@@ -23,6 +33,31 @@ function notification(changes={}){
  const data={m_payment_id:'payment-1',pf_payment_id:'provider-1',payment_status:'COMPLETE',item_description:'',amount_gross:'123.45',custom_str1:input.webhook_url,custom_str2:'payment-1',custom_str3:'12345',custom_str4:'',merchant_id:env.PAYFAST_MERCHANT_ID,...changes};
  const entries=Object.entries(data);return new URLSearchParams([...entries,['signature',itnSignature(entries,env.PAYFAST_PASSPHRASE)]]).toString();
 }
+test('unsigned trailing fields, unknown statuses and fractional gross amounts cannot reach SHESHA',async()=>{
+ const original=globalThis.fetch;const calls=[];globalThis.fetch=async(url)=>{calls.push(url);return new Response('VALID')};
+ try{for(const raw of [notification()+'&extra=unsigned',notification({payment_status:'UNKNOWN'}),notification({amount_gross:'123.451'})])assert.equal((await worker.fetch(new Request('https://pay.example/api/webhooks/payfast',{method:'POST',body:raw}),env)).status,400);assert.ok(calls.every(url=>url!==input.webhook_url));}finally{globalThis.fetch=original}
+});
+test('live notifications enforce documented CIDR source ranges even with a bypass flag',async()=>{
+ const original=globalThis.fetch;globalThis.fetch=async()=>new Response('VALID');const live={...env,PAYFAST_SANDBOX:'false'};
+ try{
+  const blocked=await worker.fetch(new Request('https://pay.example/api/webhooks/payfast',{method:'POST',headers:{'cf-connecting-ip':'197.97.145.143'},body:notification()}),live);assert.equal(blocked.status,403);
+  const allowed=await worker.fetch(new Request('https://pay.example/api/webhooks/payfast',{method:'POST',headers:{'cf-connecting-ip':'197.97.145.159'},body:notification()}),live);assert.equal(allowed.status,200);
+ }finally{globalThis.fetch=original}
+});
+test('cancelled provider notifications remain cancelled and hosted checkout blocks framing',async()=>{
+ const session=await (await create(input)).json();const page=await worker.fetch(new Request(session.checkout_url),env);assert.equal(page.headers.get('x-frame-options'),'DENY');assert.equal(page.headers.get('referrer-policy'),'no-referrer');assert.doesNotMatch(await page.text(),/name="custom_str4"/);
+ const original=globalThis.fetch;let forwarded;globalThis.fetch=async(url,options)=>{if(url===input.webhook_url)forwarded=JSON.parse(options.body);return new Response('VALID')};
+ try{assert.equal((await worker.fetch(new Request('https://pay.example/api/webhooks/payfast',{method:'POST',body:notification({payment_status:'CANCELLED'})}),env)).status,200);assert.equal(forwarded.data.status,'cancelled');}finally{globalThis.fetch=original}
+});
+test('asynchronous provider timeouts and downstream failures return retryable errors',async()=>{
+ const original=globalThis.fetch;
+ try{
+  globalThis.fetch=async()=>{const error=new Error('timeout');error.name='TimeoutError';throw error};
+  assert.equal((await worker.fetch(new Request('https://pay.example/api/webhooks/payfast',{method:'POST',body:notification()}),env)).status,504);
+  globalThis.fetch=async(url)=>new Response(url===input.webhook_url?'failed':'VALID',{status:url===input.webhook_url?500:200});
+  assert.equal((await worker.fetch(new Request('https://pay.example/api/webhooks/payfast',{method:'POST',body:notification()}),env)).status,502);
+ }finally{globalThis.fetch=original}
+});
 test('ITN with empty fields validates and forwards an exact signed SHESHA payment event',async()=>{
  const original=globalThis.fetch;const calls=[];globalThis.fetch=async(url,options)=>{calls.push({url,options});return new Response(calls.length===1?'VALID':'OK')};
  try{const r=await worker.fetch(new Request('https://pay.example/api/webhooks/payfast',{method:'POST',body:notification()}),env);assert.equal(r.status,200);assert.equal(calls.length,2);assert.equal(calls[1].url,input.webhook_url);const event=JSON.parse(calls[1].options.body);assert.equal(event.data.amount_minor,12345);assert.equal(event.data.status,'paid');assert.equal(event.data.merchant_reference,'payment-1');assert.equal(calls[1].options.headers['x-mobicom-signature'],'sha256='+createHmac('sha256',env.MOBICOM_PAY_WEBHOOK_SECRET).update(calls[1].options.body).digest('hex'));}finally{globalThis.fetch=original}
